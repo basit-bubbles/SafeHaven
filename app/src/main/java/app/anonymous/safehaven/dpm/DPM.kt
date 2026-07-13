@@ -133,7 +133,13 @@ private fun applyChromiumPolicies() {
     val bundle = Bundle().apply {
         // --- 1. CORE NETWORK & DNS ---
         putString("DnsOverHttpsMode", "secure")
-        putString("DnsOverHttpsTemplates", "https://${BuildConfig.PRIVATE_DNS}/dns-query")
+        val browserDnsRaw = BuildConfig.BROWSER_PRIVATE_DNS
+        val dohTemplate = if (browserDnsRaw.startsWith("http://") || browserDnsRaw.startsWith("https://")) {
+            browserDnsRaw
+        } else {
+            "https://$browserDnsRaw/dns-query"
+        }
+        putString("DnsOverHttpsTemplates", dohTemplate)
         putString("WebRtcIPHandling", "disable_non_proxied_udp")
         putBoolean("SitePerProcess", true) // Strict Site Isolation
         putInt("NetworkPredictionOptions", 2) // 2 = Disable prefetching (Saves data, stops background tracking)

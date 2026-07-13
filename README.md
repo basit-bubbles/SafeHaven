@@ -36,7 +36,8 @@ NOTE: This repository is configured for CI-only builds. The Gradle wrapper and l
    * `APP_WHITELIST`: Comma-separated package names (e.g., `app.anonymous.safehaven,com.android.vending,com.android.phone`). No spaces.
    * `URL_BLOCKLIST`: Comma-separated domains to block via browser policies (e.g., youtube.com,www.telegram.org,instagram.com). No spaces.
    * `BATTERY_FLAGS`: Your specific Android battery saver constants.
-   * `DNS_SPECIFIER`: Your secure DNS (e.g., `dns.quad9.net`).
+   * `SYSTEM_DNS_SPECIFIER`: Your secure DNS (DOT) for the entire operating system (e.g., `dns.quad9.net`). If env var is not set, it defaults to `dns.google`.
+   * `BROWSER_DNS_SPECIFIER`: Your secure DNS (DOH) for the browser(e.g., `https://dns.quad9.net/dns-query`). If env var is not set, it defaults to `dns.google`.
    * `KEYSTORE_BASE64`: A base64 encoded PKCS12 `.keystore` file.
    * `KEY_ALIAS`, `KEY_PASSWORD`, `KEYSTORE_PASSWORD`: Your signing credentials.
 4. Run the **Production Release** GitHub Action. Download the generated APK to your host machine.

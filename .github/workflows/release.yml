@@ -73,7 +73,8 @@ jobs:
           SAFEHAVEN_WHITELIST: ${{ secrets.APP_WHITELIST }}
           SAFEHAVEN_URL_BLOCKLIST: ${{ secrets.URL_BLOCKLIST }}
           SAFEHAVEN_BATTERY_FLAGS: ${{ secrets.BATTERY_FLAGS }}
-          SAFEHAVEN_DNS: ${{ secrets.DNS_SPECIFIER }}
+          SAFEHAVEN_SYSTEM_DNS: ${{ secrets.SYSTEM_DNS_SPECIFIER }}
+          SAFEHAVEN_BROWSER_DNS: ${{ secrets.BROWSER_DNS_SPECIFIER }}
         run: |
           cd ${{ env.ROOT_PATH }}
           AUTH_KEY_PATH=$(realpath app/safehaven-release-key.keystore)
