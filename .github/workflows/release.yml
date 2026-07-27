@@ -96,13 +96,8 @@ jobs:
           
           rm -rf app/build/outputs/apk/
 
-      - name: Publish to Private Vault Repository
-        uses: softprops/action-gh-release@v2
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
-          repository: sowrhoop/Private-Vault
-          tag_name: ${{ env.TAG_NAME }}
-          name: SafeHaven ${{ env.TAG_NAME }}
-          files: Safehaven-${{ env.TAG_NAME }}-Production.apk
-          generate_release_notes: false
-          body: "🔒 Secure automated binary drop for SafeHaven ${{ env.TAG_NAME }}."
-          token: ${{ secrets.VAULT_PAT }}
+          name: SafeHaven-APK
+          path: Safehaven-*-Production.apk
