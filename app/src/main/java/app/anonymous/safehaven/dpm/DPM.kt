@@ -55,9 +55,9 @@ suspend fun enforceAllPolicies(context: Context) = withContext(Dispatchers.IO) {
     
     runCatching { DPM.setUninstallBlocked(DAR, context.packageName, true) }
 
-    enforceBatterySaverFlags(context)
-    enforceNightLight(context)
-    enforceGrayscale(context)
+    // enforceBatterySaverFlags(context)
+    // enforceNightLight(context)
+    // enforceGrayscale(context)
     enforceAnimations(context)
     squashDeveloperOptions(context)
     applyStrictRestrictions(context) 
