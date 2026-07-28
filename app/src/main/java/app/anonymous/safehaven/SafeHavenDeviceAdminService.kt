@@ -71,8 +71,8 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
     private fun enforceDaemonState() {
         val cr = contentResolver
         
-        // --- 1. BATTERY SAVER ENFORCEMENT ---
-        runCatching {
+        // --- 1. BATTERY SAVER ENFORCEMENT (DISABLED) ---
+        if (false) runCatching {
             if (Settings.Global.getInt(cr, "low_power", 0) == 0) {
                 val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
                 val plugged = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1) ?: -1
@@ -88,8 +88,8 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
             }
         }.onFailure { Log.e("AdminService", "Battery Saver write failed", it) }
 
-        // --- 2. GRAYSCALE ENFORCEMENT PATCH ---
-        runCatching {
+        // --- 2. GRAYSCALE ENFORCEMENT PATCH (DISABLED) ---
+        if (false) runCatching {
             val isEnabled = Settings.Secure.getInt(cr, "accessibility_display_daltonizer_enabled", 0) == 1
             val mode = Settings.Secure.getInt(cr, "accessibility_display_daltonizer", -1)
             
@@ -119,8 +119,8 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
             }
         }.onFailure { Log.e("AdminService", "DNS write failed", it) }
         
-        // --- 5. NIGHT LIGHT ENFORCEMENT ---
-        runCatching {
+        // --- 5. NIGHT LIGHT ENFORCEMENT (DISABLED) ---
+        if (false) runCatching {
             if (Settings.Secure.getInt(cr, "night_display_auto_mode", 0) != 1 || 
                 Settings.Secure.getInt(cr, "night_display_custom_start_time", 0) != 79200000 ||
                 Settings.Secure.getInt(cr, "night_display_custom_end_time", 0) != 21600000 ||
