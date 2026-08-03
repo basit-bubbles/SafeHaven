@@ -2,6 +2,7 @@ package app.anonymous.safehaven.dpm
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -23,6 +24,24 @@ import java.util.Locale
 
 // Dynamically loaded from CI/CD Secrets
 private val BATTERY_SAVER_FLAGS = BuildConfig.BATTERY_SAVER_FLAGS
+
+// --- HARDENING: system apps that must always be suspended (unlaunchable + un-re-enableable) ---
+// Edit this list to taste. Anything here is force-suspended on every sweep.
+val SYSTEM_BLOCKLIST = arrayOf(
+    "com.android.chrome",
+    "com.sec.android.app.sbrowser",
+    "com.android.vending",
+    "com.sec.android.app.samsungapps",
+    "com.google.android.youtube",
+    "com.google.android.apps.youtube.music",
+    "com.google.android.googlequicksearchbox",
+    "com.google.android.apps.docs",
+    "com.google.android.videos",
+    "com.google.android.apps.tachyon",
+    "com.google.android.apps.photos",
+    "com.microsoft.skydrive",
+    "com.samsung.android.spay"
+)
 
 fun retrieveSecurityLogs() {
     CoroutineScope(Dispatchers.IO).launch { runCatching { DPM.retrieveSecurityLogs(DAR) } }
@@ -52,22 +71,22 @@ suspend fun enforceAllPolicies(context: Context) = withContext(Dispatchers.IO) {
         applyChromiumPolicies()
         enforcePrivateDns(context)
     }
-    
+
     runCatching { DPM.setUninstallBlocked(DAR, context.packageName, true) }
 
-    // enforceBatterySaverFlags(context)
-    // enforceNightLight(context)
-    // enforceGrayscale(context)
+    // enforceBatterySaverFlags(context)   // DISABLED — caused shutdowns
+    // enforceNightLight(context)          // DISABLED — keep normal colors
+    // enforceGrayscale(context)           // DISABLED — keep full color
     enforceAnimations(context)
     squashDeveloperOptions(context)
-    applyStrictRestrictions(context) 
+    applyStrictRestrictions(context)
     enforceStrictWhitelist(context)
 }
 
 private fun squashDeveloperOptions(context: Context) = runCatching {
     if (!SP.hasRebootedSinceSetup) return@runCatching
     val cr = context.contentResolver
-    
+
     if (Settings.Global.getInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) != 0) {
         Settings.Global.putInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0)
     }
@@ -88,9 +107,9 @@ private fun enforcePrivateDns(context: Context) = runCatching {
 
 private fun enforceNightLight(context: Context) = runCatching {
     val cr = context.contentResolver
-    Settings.Secure.putInt(cr, "night_display_auto_mode", 1) 
-    Settings.Secure.putInt(cr, "night_display_custom_start_time", 79200000) 
-    Settings.Secure.putInt(cr, "night_display_custom_end_time", 21600000) 
+    Settings.Secure.putInt(cr, "night_display_auto_mode", 1)
+    Settings.Secure.putInt(cr, "night_display_custom_start_time", 79200000)
+    Settings.Secure.putInt(cr, "night_display_custom_end_time", 21600000)
     Settings.Secure.putInt(cr, "night_display_color_temperature", 2500)
 
     val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
@@ -104,7 +123,7 @@ private fun enforceGrayscale(context: Context) = runCatching {
     val cr = context.contentResolver
     val isEnabled = Settings.Secure.getInt(cr, "accessibility_display_daltonizer_enabled", 0) == 1
     val mode = Settings.Secure.getInt(cr, "accessibility_display_daltonizer", -1)
-    
+
     if (!isEnabled || mode != 0) {
         Settings.Secure.putInt(cr, "accessibility_display_daltonizer", 0)
         Settings.Secure.putInt(cr, "accessibility_display_daltonizer_enabled", 1)
@@ -131,7 +150,6 @@ private fun enforceBatterySaverFlags(context: Context) = runCatching {
 
 private fun applyChromiumPolicies() {
     val bundle = Bundle().apply {
-        // --- 1. CORE NETWORK & DNS ---
         putString("DnsOverHttpsMode", "secure")
         val browserDnsRaw = BuildConfig.BROWSER_PRIVATE_DNS
         val dohTemplate = if (browserDnsRaw.startsWith("http://") || browserDnsRaw.startsWith("https://")) {
@@ -141,41 +159,37 @@ private fun applyChromiumPolicies() {
         }
         putString("DnsOverHttpsTemplates", dohTemplate)
         putString("WebRtcIPHandling", "disable_non_proxied_udp")
-        putBoolean("SitePerProcess", true) // Strict Site Isolation
-        putInt("NetworkPredictionOptions", 2) // 2 = Disable prefetching (Saves data, stops background tracking)
-        
-        // --- 2. DOPAMINE DETOX & ANTI-RABBIT HOLE ---
-        putInt("IncognitoModeAvailability", 1) // 1 = Disabled
-        putBoolean("SearchSuggestEnabled", false) // Kill predictive search suggestions
+        putBoolean("SitePerProcess", true)
+        putInt("NetworkPredictionOptions", 2)
+
+        putInt("IncognitoModeAvailability", 1)
+        putBoolean("SearchSuggestEnabled", false)
         putBoolean("PromotionalTabsEnabled", false)
-        
-        // --- 3. ANTI-CONVENIENCE (Force Intentionality) ---
-        putInt("BrowserSignin", 0) // 0 = Disable browser sign-in completely
+
+        putInt("BrowserSignin", 0)
         putBoolean("SyncDisabled", true)
         putBoolean("PasswordManagerEnabled", false)
         putBoolean("AutofillAddressEnabled", false)
         putBoolean("AutofillCreditCardEnabled", false)
-        
-        // --- 4. ABSOLUTE PRIVACY ---
-        putBoolean("DisableScreenshots", true) // Prevents other apps from scraping the browser screen
+
+        putBoolean("DisableScreenshots", true)
         putBoolean("MetricsReportingEnabled", false)
         putBoolean("UrlKeyedAnonymizedDataCollectionEnabled", false)
 
-        // --- 5. NATIVE URL BLOCKLIST (Site-level Dopamine Detox) ---
         val blocklistRaw = BuildConfig.URL_BLOCKLIST
         if (blocklistRaw.isNotBlank()) {
             val blocklistArray = blocklistRaw.split(",")
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
                 .toTypedArray()
-            
+
             if (blocklistArray.isNotEmpty()) {
                 putStringArray("URLBlocklist", blocklistArray)
                 Log.d("ChromiumPolicies", "Injected ${blocklistArray.size} domain blocks into Chromium networking stack.")
             }
         }
     }
-    
+
     arrayOf("com.android.chrome", "com.brave.browser").forEach { pkg ->
         runCatching { DPM.setApplicationRestrictions(DAR, pkg, bundle) }
     }
@@ -185,10 +199,14 @@ fun applyStrictRestrictions(context: Context) {
     val desiredRestrictions = buildSet {
         add(UserManager.DISALLOW_ADD_USER)
         add(UserManager.DISALLOW_REMOVE_USER)
-        add(UserManager.DISALLOW_SAFE_BOOT) 
+        add(UserManager.DISALLOW_SAFE_BOOT)
         add(UserManager.DISALLOW_FACTORY_RESET)
         add(UserManager.DISALLOW_CONFIG_DATE_TIME)
         add(UserManager.DISALLOW_ADD_MANAGED_PROFILE)
+        // --- HARDENING: close the app-management + install loopholes ---
+        add(UserManager.DISALLOW_APPS_CONTROL)              // can't enable/disable/force-stop apps in Settings
+        add(UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES)   // no sideloading APKs
+        add(UserManager.DISALLOW_UNINSTALL_APPS)            // can't uninstall to bypass
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             add(UserManager.DISALLOW_USER_SWITCH)
@@ -204,7 +222,7 @@ fun applyStrictRestrictions(context: Context) {
             val cr = context.contentResolver
             val devOptionsOff = Settings.Global.getInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) == 0
             val adbOff = Settings.Global.getInt(cr, Settings.Global.ADB_ENABLED, 0) == 0
-            
+
             if (devOptionsOff && adbOff) {
                 add(UserManager.DISALLOW_DEBUGGING_FEATURES)
                 Log.d("Lockdown", "Dev Options and ADB verified off. DEBUGGING_FEATURES locked.")
@@ -238,11 +256,17 @@ suspend fun enforceStrictWhitelist(context: Context) = withContext(Dispatchers.I
     try {
         hideLauncherIcon(context)
         val whitelist = AppWhitelist.getWhitelist()
+
+        // 1. User-installed apps: suspend anything not whitelisted (fixes freely-run new installs).
         val installedApps = AppWhitelist.getInstalledUserApps(context)
         val (toUnsuspend, toSuspend) = installedApps.map { it.packageName }.partition { it in whitelist }
 
         if (toUnsuspend.isNotEmpty()) runCatching { DPM.setPackagesSuspended(DAR, toUnsuspend.toTypedArray(), false) }
         if (toSuspend.isNotEmpty()) runCatching { DPM.setPackagesSuspended(DAR, toSuspend.toTypedArray(), true) }
+
+        // 2. System blocklist: force-suspend browsers/stores/etc., but never anything whitelisted.
+        val blockThese = SYSTEM_BLOCKLIST.filter { it !in whitelist }.toTypedArray()
+        if (blockThese.isNotEmpty()) runCatching { DPM.setPackagesSuspended(DAR, blockThese, true) }
     } finally {
         Privilege.lockdownActive.value = false
     }
