@@ -13,6 +13,7 @@ import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
 import app.anonymous.safehaven.dpm.applyStrictRestrictions
+import app.anonymous.safehaven.dpm.enforceStrictWhitelist
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -24,6 +25,16 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
     private var isReceiverRegistered = false
     private val serviceScope = CoroutineScope(Dispatchers.IO)
 
+    // --- HARDENING: continuous enforcement sweep ---
+    private val sweepHandler = Handler(Looper.getMainLooper())
+    private val sweepRunnable = object : Runnable {
+        override fun run() {
+            serviceScope.launch { runCatching { enforceStrictWhitelist(applicationContext) } }
+            serviceScope.launch { runCatching { enforceDaemonState() } }
+            sweepHandler.postDelayed(this, 10000L)
+        }
+    }
+
     private val policyObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean, uri: Uri?) {
             super.onChange(selfChange, uri)
@@ -33,12 +44,12 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
 
     override fun onCreate() {
         super.onCreate()
-        
+
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REPLACED)
             addDataScheme("package")
-            priority = 999 
+            priority = 999
         }
         ContextCompat.registerReceiver(this, packageReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         isReceiverRegistered = true
@@ -48,7 +59,7 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
             arrayOf(
                 Settings.Global.getUriFor("low_power"),
                 Settings.Secure.getUriFor("accessibility_display_daltonizer_enabled"),
-                Settings.Secure.getUriFor("accessibility_display_daltonizer"), 
+                Settings.Secure.getUriFor("accessibility_display_daltonizer"),
                 Settings.Global.getUriFor("window_animation_scale"),
                 Settings.Global.getUriFor("transition_animation_scale"),
                 Settings.Global.getUriFor("animator_duration_scale"),
@@ -63,20 +74,23 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
                 Settings.Global.getUriFor(Settings.Global.DEVELOPMENT_SETTINGS_ENABLED),
                 Settings.Global.getUriFor(Settings.Global.ADB_ENABLED)
             ).forEach { uri -> cr.registerContentObserver(uri, false, policyObserver) }
-            
+
             Log.d("AdminService", "Service bound and monitoring system state.")
         }.onFailure { Log.e("AdminService", "Failed to bind ContentObservers", it) }
+
+        // --- HARDENING: start the continuous sweep ---
+        sweepHandler.post(sweepRunnable)
     }
 
     private fun enforceDaemonState() {
         val cr = contentResolver
-        
+
         // --- 1. BATTERY SAVER ENFORCEMENT (DISABLED) ---
         if (false) runCatching {
             if (Settings.Global.getInt(cr, "low_power", 0) == 0) {
                 val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
                 val plugged = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1) ?: -1
-                val isUnplugged = plugged == 0 || plugged == -1 
+                val isUnplugged = plugged == 0 || plugged == -1
 
                 if (isUnplugged) {
                     Settings.Global.putInt(cr, "low_power", 1)
@@ -92,7 +106,7 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
         if (false) runCatching {
             val isEnabled = Settings.Secure.getInt(cr, "accessibility_display_daltonizer_enabled", 0) == 1
             val mode = Settings.Secure.getInt(cr, "accessibility_display_daltonizer", -1)
-            
+
             if (!isEnabled || mode != 0) {
                 Settings.Secure.putInt(cr, "accessibility_display_daltonizer", 0)
                 Settings.Secure.putInt(cr, "accessibility_display_daltonizer_enabled", 1)
@@ -109,8 +123,8 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
             }
         }.onFailure { Log.e("AdminService", "Animation write failed", it) }
 
-        // --- 4. MULLVAD DNS ENFORCEMENT ---
-        runCatching {
+        // --- 4. MULLVAD DNS ENFORCEMENT (DISABLED) ---
+        if (false) runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && Settings.Global.getString(cr, "private_dns_mode") != "hostname") {
                 Settings.Global.putString(cr, "private_dns_mode", "hostname")
                 Settings.Global.putString(cr, "private_dns_specifier", "all.dns.mullvad.net")
@@ -118,20 +132,20 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
                 Privilege.DPM.setGlobalSetting(Privilege.DAR, "private_dns_specifier", "all.dns.mullvad.net")
             }
         }.onFailure { Log.e("AdminService", "DNS write failed", it) }
-        
+
         // --- 5. NIGHT LIGHT ENFORCEMENT (DISABLED) ---
         if (false) runCatching {
-            if (Settings.Secure.getInt(cr, "night_display_auto_mode", 0) != 1 || 
+            if (Settings.Secure.getInt(cr, "night_display_auto_mode", 0) != 1 ||
                 Settings.Secure.getInt(cr, "night_display_custom_start_time", 0) != 79200000 ||
                 Settings.Secure.getInt(cr, "night_display_custom_end_time", 0) != 21600000 ||
                 Settings.Secure.getInt(cr, "night_display_color_temperature", 0) != 2500) {
-                
+
                 Settings.Secure.putInt(cr, "night_display_auto_mode", 1)
-                Settings.Secure.putInt(cr, "night_display_custom_start_time", 79200000) 
-                Settings.Secure.putInt(cr, "night_display_custom_end_time", 21600000)   
+                Settings.Secure.putInt(cr, "night_display_custom_start_time", 79200000)
+                Settings.Secure.putInt(cr, "night_display_custom_end_time", 21600000)
                 Settings.Secure.putInt(cr, "night_display_color_temperature", 2500)
             }
-            
+
             val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
             val isNightTime = hour >= 22 || hour < 6
             if (isNightTime && Settings.Secure.getInt(cr, "night_display_activated", 0) == 0) {
@@ -152,14 +166,13 @@ class SafeHavenDeviceAdminService : DeviceAdminService() {
                 }
             }.onFailure { Log.e("AdminService", "Failed to squash Dev Options", it) }
         }
-        
+
         // --- 7. DYNAMIC RESTRICTION SYNC ---
-        // This will automatically lock Locale to German (if conditions are met)
-        // AND enforce DISALLOW_DEBUGGING_FEATURES instantly after the ghost trap above ensures they are explicitly 0.
         applyStrictRestrictions(this)
     }
 
     override fun onDestroy() {
+        sweepHandler.removeCallbacks(sweepRunnable)
         if (isReceiverRegistered) {
             runCatching { unregisterReceiver(packageReceiver) }
             isReceiverRegistered = false
