@@ -30,7 +30,6 @@ private val BATTERY_SAVER_FLAGS = BuildConfig.BATTERY_SAVER_FLAGS
 val SYSTEM_BLOCKLIST = arrayOf(
     "com.android.chrome",
     "com.sec.android.app.sbrowser",
-    "com.android.vending",
     "com.sec.android.app.samsungapps",
     "com.google.android.youtube",
     "com.google.android.apps.youtube.music",
