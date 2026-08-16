@@ -37,7 +37,6 @@ val SYSTEM_BLOCKLIST = arrayOf(
     "com.google.android.apps.docs",
     "com.google.android.videos",
     "com.google.android.apps.tachyon",
-    "com.google.android.apps.photos",
     "com.microsoft.skydrive",
     "com.samsung.android.spay"
 )
