@@ -2,6 +2,7 @@ package app.anonymous.safehaven.dpm
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
@@ -28,17 +29,85 @@ private val BATTERY_SAVER_FLAGS = BuildConfig.BATTERY_SAVER_FLAGS
 // --- HARDENING: system apps that must always be suspended (unlaunchable + un-re-enableable) ---
 // Edit this list to taste. Anything here is force-suspended on every sweep.
 val SYSTEM_BLOCKLIST = arrayOf(
+    // Browsers
     "com.android.chrome",
+    "com.chrome.beta",
     "com.sec.android.app.sbrowser",
+    "com.sec.android.app.sbrowser.beta",
+    "com.microsoft.emmx",
+    "org.mozilla.firefox",
+    "com.opera.browser",
+    "com.brave.browser",
+    "com.duckduckgo.mobile.android",
+    // Stores and installers
     "com.sec.android.app.samsungapps",
+    "com.samsung.android.themestore",
+    "com.facebook.system",
+    "com.facebook.appmanager",
+    "com.facebook.services",
+    // Video, social and feeds
     "com.google.android.youtube",
     "com.google.android.apps.youtube.music",
-    "com.google.android.googlequicksearchbox",
-    "com.google.android.apps.docs",
+    "com.google.android.apps.youtube.kids",
     "com.google.android.videos",
+    "com.google.android.apps.magazines",
+    "com.google.android.play.games",
+    "com.facebook.katana",
+    "com.instagram.android",
+    "com.zhiliaoapp.musically",
+    "com.netflix.mediaclient",
+    "com.spotify.music",
+    "com.linkedin.android",
+    "com.samsung.android.app.spage",
+    "com.samsung.android.game.gamehome",
+    // Search and assistants
+    "com.google.android.googlequicksearchbox",
+    "com.google.android.apps.bard",
+    "com.google.android.apps.googleassistant",
+    "com.samsung.android.bixby.agent",
+    // Other preloads
+    "com.google.android.apps.docs",
     "com.google.android.apps.tachyon",
     "com.microsoft.skydrive",
-    "com.samsung.android.spay"
+    "com.samsung.android.spay",
+    "com.samsung.knox.securefolder"
+)
+
+// --- DEFAULT DENY: preinstalled apps the phone needs to work. Every other app with a
+// home-screen icon that is not on APP_WHITELIST and not in this set gets suspended.
+val ESSENTIAL_SYSTEM_APPS = setOf(
+    // Play Store and the Google services it needs to install and update apps
+    "com.android.vending",
+    "com.google.android.gms",
+    "com.google.android.gsf",
+    "com.google.android.webview",
+    "com.google.android.modulemetadata",
+    // Phone basics
+    "com.android.settings",
+    "com.samsung.android.app.telephonyui",
+    "com.samsung.android.app.smartcapture",
+    "com.samsung.android.lool",
+    "com.samsung.android.fmm",
+    "com.samsung.accessibility",
+    "com.wssyncmldm",
+    "com.sec.android.soagent",
+    "com.samsung.android.dialer",
+    "com.samsung.android.incallui",
+    "com.android.phone",
+    "com.android.server.telecom",
+    "com.samsung.android.messaging",
+    "com.samsung.android.app.contacts",
+    "com.sec.android.app.camera",
+    "com.sec.android.gallery3d",
+    "com.sec.android.app.popupcalculator",
+    "com.sec.android.app.myfiles",
+    "com.sec.android.app.launcher",
+    "com.samsung.android.emergency",
+    "com.android.systemui",
+    "com.samsung.android.honeyboard",
+    "com.google.android.dialer",
+    "com.google.android.apps.messaging",
+    "com.google.android.contacts"
 )
 
 fun retrieveSecurityLogs() {
@@ -265,6 +334,27 @@ suspend fun enforceStrictWhitelist(context: Context) = withContext(Dispatchers.I
         // 2. System blocklist: force-suspend browsers/stores/etc., but never anything whitelisted.
         val blockThese = SYSTEM_BLOCKLIST.filter { it !in whitelist }.toTypedArray()
         if (blockThese.isNotEmpty()) runCatching { DPM.setPackagesSuspended(DAR, blockThese, true) }
+
+        // 3. Default deny: any app with a home-screen icon (system or not) that is neither
+        //    whitelisted nor essential gets suspended. Home-screen apps are never touched.
+        runCatching {
+            val pm = context.packageManager
+            val flags = PackageManager.MATCH_DISABLED_COMPONENTS or PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
+            fun packagesFor(category: String): Set<String> {
+                val intent = Intent(Intent.ACTION_MAIN).addCategory(category)
+                val found = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
+                } else {
+                    @Suppress("DEPRECATION") pm.queryIntentActivities(intent, flags)
+                }
+                return found.map { it.activityInfo.packageName }.toSet()
+            }
+            val homeApps = packagesFor(Intent.CATEGORY_HOME)
+            val denyThese = packagesFor(Intent.CATEGORY_LAUNCHER).filter {
+                it !in whitelist && it !in ESSENTIAL_SYSTEM_APPS && it !in homeApps && it != context.packageName
+            }.toTypedArray()
+            if (denyThese.isNotEmpty()) DPM.setPackagesSuspended(DAR, denyThese, true)
+        }.onFailure { Log.e("Lockdown", "Default-deny sweep failed", it) }
     } finally {
         Privilege.lockdownActive.value = false
     }
