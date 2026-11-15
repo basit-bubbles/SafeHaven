@@ -103,6 +103,9 @@ val ESSENTIAL_SYSTEM_APPS = setOf(
     "com.sec.android.app.myfiles",
     "com.sec.android.app.launcher",
     "com.samsung.android.emergency",
+    "com.android.cellbroadcastreceiver",
+    "com.google.android.cellbroadcastreceiver",
+    "com.samsung.android.cellbroadcastreceiver",
     "com.android.systemui",
     "com.samsung.android.honeyboard",
     "com.google.android.dialer",
@@ -317,6 +320,9 @@ private fun hideLauncherIcon(context: Context) = runCatching {
 }
 
 suspend fun enforceStrictWhitelist(context: Context) = withContext(Dispatchers.IO) {
+    // Refresh the Device Owner flag first. The cached value can stay "false" until a reboot,
+    // which silently skipped all app blocking before the lock restart.
+    runCatching { Privilege.updateStatus() }
     if (!Privilege.status.value.device) return@withContext
     Privilege.lockdownActive.value = true
 
