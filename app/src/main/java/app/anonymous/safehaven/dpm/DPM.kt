@@ -103,6 +103,14 @@ val ESSENTIAL_SYSTEM_APPS = setOf(
     "com.sec.android.app.myfiles",
     "com.sec.android.app.launcher",
     "com.samsung.android.emergency",
+    "com.google.android.documentsui",
+    "com.android.documentsui",
+    "com.google.android.projection.gearhead",
+    "com.android.stk",
+    "com.android.stk2",
+    "com.samsung.android.app.routines",
+    "com.samsung.android.forest",
+    "com.samsung.ssu",
     "com.android.cellbroadcastreceiver",
     "com.google.android.cellbroadcastreceiver",
     "com.samsung.android.cellbroadcastreceiver",
@@ -112,6 +120,10 @@ val ESSENTIAL_SYSTEM_APPS = setOf(
     "com.google.android.apps.messaging",
     "com.google.android.contacts"
 )
+
+// Set after Monk Mind releases system apps that an earlier, broader rule blocked by mistake.
+// Resets each time the app starts (after an update or a restart), so the clean-up runs once per start.
+@Volatile private var releasedSystemAppsThisRun = false
 
 fun retrieveSecurityLogs() {
     CoroutineScope(Dispatchers.IO).launch { runCatching { DPM.retrieveSecurityLogs(DAR) } }
@@ -345,7 +357,9 @@ suspend fun enforceStrictWhitelist(context: Context) = withContext(Dispatchers.I
         //    whitelisted nor essential gets suspended. Home-screen apps are never touched.
         runCatching {
             val pm = context.packageManager
-            val flags = PackageManager.MATCH_DISABLED_COMPONENTS or PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
+            // Only apps with a visible home-screen icon. Hidden system parts (file picker,
+            // Android Auto, SIM menu, network unlock and similar) are never touched.
+            val flags = 0
             fun packagesFor(category: String): Set<String> {
                 val intent = Intent(Intent.ACTION_MAIN).addCategory(category)
                 val found = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -359,6 +373,21 @@ suspend fun enforceStrictWhitelist(context: Context) = withContext(Dispatchers.I
             val denyThese = packagesFor(Intent.CATEGORY_LAUNCHER).filter {
                 it !in whitelist && it !in ESSENTIAL_SYSTEM_APPS && it !in homeApps && it != context.packageName
             }.toTypedArray()
+            // 4. Clean-up: release every system app that is not supposed to be blocked right now.
+            if (!releasedSystemAppsThisRun) {
+                val keepBlocked = blockThese.toSet() + denyThese.toSet()
+                val installed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+                } else {
+                    @Suppress("DEPRECATION") pm.getInstalledApplications(0)
+                }
+                val release = installed
+                    .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) != 0 && it.packageName !in keepBlocked }
+                    .map { it.packageName }
+                    .toTypedArray()
+                if (release.isNotEmpty()) runCatching { DPM.setPackagesSuspended(DAR, release, false) }
+                releasedSystemAppsThisRun = true
+            }
             if (denyThese.isNotEmpty()) DPM.setPackagesSuspended(DAR, denyThese, true)
         }.onFailure { Log.e("Lockdown", "Default-deny sweep failed", it) }
     } finally {
