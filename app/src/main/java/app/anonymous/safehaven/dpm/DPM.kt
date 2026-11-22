@@ -188,7 +188,7 @@ suspend fun enforceAllPolicies(context: Context) = withContext(Dispatchers.IO) {
 }
 
 // Lets the quiet "Monk Mind is on" notification show, so you can see protection is running
-// and reach the "Update apps" button.
+// and reach the "Install or update" button.
 private fun allowStatusNotification(context: Context) = runCatching {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         val permission = Manifest.permission.POST_NOTIFICATIONS
@@ -426,7 +426,8 @@ suspend fun enforceStrictWhitelist(context: Context) = withContext(Dispatchers.I
                 self = self,
                 blockedThisRun = blockedThisRun,
                 releasedThisRun = releasedThisRun,
-                canTryBlock = { now >= (retryBlockAfter[it] ?: 0L) }
+                canTryBlock = { now >= (retryBlockAfter[it] ?: 0L) },
+                openDuringSetup = if (inSetupMode(context)) setOf(SETUP_BROWSER) else emptySet()
             )
             val toBlock = plan.toBlock
             val toRelease = plan.toRelease
@@ -488,6 +489,7 @@ internal data class BlockPlan(val shouldBlock: Set<String>, val toBlock: List<St
  * - Block: apps you installed that are not on your list; built-in distractions on the block list;
  *   any other app with a home-screen icon that is not on your list and not essential.
  * - Never block: Monk Mind itself, anything on your list, essential phone apps, home screens.
+ * - During setup only (USB debugging on, not sealed): Chrome stays open for web sign-ins.
  * - Release: anything paused that should not be. Skipped when the icon lookup came back
  *   empty (a failed read), so a glitch can never open the blocked apps.
  */
@@ -501,7 +503,8 @@ internal fun planBlocking(
     self: String,
     blockedThisRun: Set<String>,
     releasedThisRun: Set<String>,
-    canTryBlock: (String) -> Boolean
+    canTryBlock: (String) -> Boolean,
+    openDuringSetup: Set<String> = emptySet()
 ): BlockPlan {
     val installedNames = installed.map { it.pkg }.toHashSet()
     val pausedNow = installed.filter { it.paused }.map { it.pkg }.toHashSet()
@@ -513,6 +516,7 @@ internal fun planBlocking(
         it in installedNames && it !in whitelist && it !in essential && it !in homeApps
     }
     shouldBlock.remove(self)
+    shouldBlock.removeAll(openDuringSetup)
 
     val toBlock = shouldBlock
         .filter { !(it in pausedNow && it in blockedThisRun) && canTryBlock(it) }
@@ -522,6 +526,18 @@ internal fun planBlocking(
         .sorted()
     return BlockPlan(shouldBlock, toBlock, toRelease)
 }
+
+// ---------------------------------------------------------------------------------------------
+// Setup mode
+// Before the seal, while USB debugging is on, installing and Chrome stay open so apps that sign
+// in through a web page (like SoundCloud) can be set up. Turning USB debugging off ends it at once.
+// ---------------------------------------------------------------------------------------------
+
+const val SETUP_BROWSER = "com.android.chrome"
+
+fun inSetupMode(context: Context): Boolean = !SP.isSealed && runCatching {
+    Settings.Global.getInt(context.contentResolver, Settings.Global.ADB_ENABLED, 0) != 0
+}.getOrDefault(false)
 
 // ---------------------------------------------------------------------------------------------
 // Install lock
@@ -536,7 +552,7 @@ const val UPDATE_WINDOW_MS = 15 * 60 * 1000L
  * Pure rule (no Android calls), so it can be tested on its own.
  * Installing and updating apps is allowed only:
  * - while USB debugging is on, before the seal (setup and testing);
- * - during an "Update apps" window from the Monk Mind notification (15 minutes);
+ * - during an "Install or update" window from the Monk Mind notification (15 minutes);
  * - while the phone is charging with the screen off (when the Play Store auto-updates, usually overnight).
  */
 internal fun installsAllowed(

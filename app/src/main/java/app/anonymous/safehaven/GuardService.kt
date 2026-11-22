@@ -30,7 +30,7 @@ import java.util.Date
  * Keeps Monk Mind running all the time, independent of anything else.
  * A Device Owner app is allowed to run this kind of service ("system exempted"),
  * so Android does not put it to sleep or close it in the background.
- * It shows one quiet notification: "Monk Mind is on", with an "Update apps" button.
+ * It shows one quiet notification: "Monk Mind is on", with an "Install or update" button.
  */
 class GuardService : Service() {
 
@@ -83,8 +83,8 @@ class GuardService : Service() {
 
 /**
  * The "Monk Mind is on" notification. Three states:
- * - setup mode: USB debugging is on (before the seal), installing is open;
- * - locked: installing is locked, with an "Update apps (15 min)" button.
+ * - setup mode: USB debugging is on (before the seal), installing and Chrome are open;
+ * - locked: installing is locked, with an "Install or update (15 min)" button.
  *   Before the seal the title says "test mode, not sealed", so you can see the seal happened;
  * - update window: installing is open until a set time; new apps still get blocked.
  */
@@ -143,10 +143,10 @@ object StatusNotification {
         when (mode) {
             "setup" -> builder
                 .setContentTitle("Monk Mind is on (setup mode)")
-                .setContentText("USB debugging is on, so installing is open.")
+                .setContentText("USB debugging is on, so installing and Chrome are open.")
             "window" -> builder
-                .setContentTitle("App updates are open until $detail")
-                .setContentText("Update your apps in the Play Store now. New apps still get blocked.")
+                .setContentTitle("Installing is open until $detail")
+                .setContentText("Install or update apps from your list now. Anything else still gets blocked.")
             else -> {
                 builder
                     .setContentTitle(if (detail == "test") "Monk Mind is on (test mode, not sealed)" else "Monk Mind is on")
@@ -157,7 +157,7 @@ object StatusNotification {
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
                 @Suppress("DEPRECATION")
-                builder.addAction(Notification.Action.Builder(null, "Update apps (15 min)", tap).build())
+                builder.addAction(Notification.Action.Builder(null, "Install or update (15 min)", tap).build())
             }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -177,7 +177,7 @@ object StatusNotification {
     }
 }
 
-/** "Update apps (15 min)" button: opens installing for 15 minutes so the Play Store can update. */
+/** "Install or update (15 min)" button: opens installing for 15 minutes (apps on your list only open). */
 class UpdateWindowReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ACTION) return

@@ -38,7 +38,7 @@ class SharedPrefs(context: Context) {
         get() = sharedPrefs.getBoolean("monk_sealed_v2", false)
         set(value) { sharedPrefs.edit().putBoolean("monk_sealed_v2", value).commit() }
 
-    // End time (wall clock, ms) of an "Update apps" window opened from the Monk Mind notification.
+    // End time (wall clock, ms) of an "Install or update" window opened from the Monk Mind notification.
     var updateWindowUntil: Long
         get() = sharedPrefs.getLong("monk_update_window_until", 0L)
         set(value) { sharedPrefs.edit().putLong("monk_update_window_until", value).commit() }

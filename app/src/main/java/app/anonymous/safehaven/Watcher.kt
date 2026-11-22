@@ -63,9 +63,10 @@ object Watcher {
         }
     }
 
+    // Full pass, so turning USB debugging off blocks Chrome straight away (end of setup mode).
     private val settingsObserver = object : ContentObserver(handler) {
         override fun onChange(selfChange: Boolean, uri: Uri?) {
-            app?.let { request(it, "settings", full = false) }
+            app?.let { request(it, "settings", full = true) }
         }
     }
 
