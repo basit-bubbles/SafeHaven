@@ -11,14 +11,15 @@ class Receiver : DeviceAdminReceiver() {
     override fun onEnabled(context: Context, intent: Intent) {
         super.onEnabled(context, intent)
         Privilege.updateStatus()
-        Log.d("AdminDaemon", "Kernel privileges locked in.")
+        Log.i(Watcher.TAG, "Admin enabled")
         handlePrivilegeChange(context)
+        runCatching { Guard.ensureRunning(context) }
     }
 
     override fun onDisabled(context: Context, intent: Intent) {
         super.onDisabled(context, intent)
         Privilege.updateStatus()
-        Log.d("AdminDaemon", "Kernel privileges revoked.")
+        Log.i(Watcher.TAG, "Admin disabled")
     }
 
     override fun onSecurityLogsAvailable(context: Context, intent: Intent) {

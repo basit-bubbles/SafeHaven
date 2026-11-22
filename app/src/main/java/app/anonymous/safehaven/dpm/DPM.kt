@@ -1,27 +1,40 @@
 package app.anonymous.safehaven.dpm
 
+import android.Manifest
+import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.os.SystemClock
 import android.os.UserManager
 import android.provider.Settings
 import android.util.Log
 import androidx.annotation.RequiresApi
+import androidx.core.content.ContextCompat
 import app.anonymous.safehaven.AppWhitelist
 import app.anonymous.safehaven.BuildConfig
 import app.anonymous.safehaven.Privilege
 import app.anonymous.safehaven.Privilege.DAR
 import app.anonymous.safehaven.Privilege.DPM
 import app.anonymous.safehaven.SP
+import app.anonymous.safehaven.StatusNotification
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+
+private const val TAG = "MonkMind"
 
 // Dynamically loaded from CI/CD Secrets
 private val BATTERY_SAVER_FLAGS = BuildConfig.BATTERY_SAVER_FLAGS
@@ -121,9 +134,17 @@ val ESSENTIAL_SYSTEM_APPS = setOf(
     "com.google.android.contacts"
 )
 
-// Set after Monk Mind releases system apps that an earlier, broader rule blocked by mistake.
-// Resets each time the app starts (after an update or a restart), so the clean-up runs once per start.
-@Volatile private var releasedSystemAppsThisRun = false
+// Only one blocking pass runs at a time.
+private val enforceMutex = Mutex()
+// Packages Android refused to pause (for example the active home screen) -> time to try again.
+// A refusal is retried after 10 minutes, so a one-off hiccup can never leave an app open for good.
+private val retryBlockAfter = ConcurrentHashMap<String, Long>()
+private const val RETRY_BLOCK_MS = 10 * 60 * 1000L
+// Packages already released this run, so a release is not repeated every pass.
+private val releasedThisRun: MutableSet<String> = ConcurrentHashMap.newKeySet()
+// Packages Monk Mind itself has blocked this run. Each run blocks everything once on its own,
+// even if another app (such as a focus mode) had already paused it.
+private val blockedThisRun: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
 fun retrieveSecurityLogs() {
     CoroutineScope(Dispatchers.IO).launch { runCatching { DPM.retrieveSecurityLogs(DAR) } }
@@ -160,13 +181,44 @@ suspend fun enforceAllPolicies(context: Context) = withContext(Dispatchers.IO) {
     // enforceNightLight(context)          // DISABLED — keep normal colors
     // enforceGrayscale(context)           // DISABLED — keep full color
     enforceAnimations(context)
+    allowStatusNotification(context)
     squashDeveloperOptions(context)
     applyStrictRestrictions(context)
     enforceStrictWhitelist(context)
 }
 
+// Lets the quiet "Monk Mind is on" notification show, so you can see protection is running
+// and reach the "Update apps" button.
+private fun allowStatusNotification(context: Context) = runCatching {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val permission = Manifest.permission.POST_NOTIFICATIONS
+        val state = DPM.getPermissionGrantState(DAR, context.packageName, permission)
+        if (state != DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED) {
+            DPM.setPermissionGrantState(
+                DAR, context.packageName, permission, DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+            )
+            Log.i(TAG, "Notification permission granted")
+            // A notification posted before the grant was dropped, so post it again.
+            StatusNotification.invalidate()
+            StatusNotification.refresh(context)
+        }
+    }
+}
+
+/**
+ * Cheap checks that run every 10 seconds: zero animations, the developer-options lock
+ * (only after the seal) and the restriction list. Nothing is written unless something changed.
+ */
+fun enforceLockState(context: Context) {
+    runCatching { Privilege.updateStatus() }
+    if (!Privilege.status.value.device) return
+    enforceAnimations(context)
+    squashDeveloperOptions(context)
+    applyStrictRestrictions(context)
+}
+
 private fun squashDeveloperOptions(context: Context) = runCatching {
-    if (!SP.hasRebootedSinceSetup) return@runCatching
+    if (!SP.isSealed) return@runCatching
     val cr = context.contentResolver
 
     if (Settings.Global.getInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) != 0) {
@@ -214,9 +266,9 @@ private fun enforceGrayscale(context: Context) = runCatching {
 
 private fun enforceAnimations(context: Context) = runCatching {
     val cr = context.contentResolver
-    Settings.Global.putFloat(cr, "window_animation_scale", 0.0f)
-    Settings.Global.putFloat(cr, "transition_animation_scale", 0.0f)
-    Settings.Global.putFloat(cr, "animator_duration_scale", 0.0f)
+    for (key in arrayOf("window_animation_scale", "transition_animation_scale", "animator_duration_scale")) {
+        if (Settings.Global.getFloat(cr, key, 1.0f) != 0.0f) Settings.Global.putFloat(cr, key, 0.0f)
+    }
 }
 
 private fun enforceBatterySaverFlags(context: Context) = runCatching {
@@ -289,6 +341,8 @@ fun applyStrictRestrictions(context: Context) {
         add(UserManager.DISALLOW_APPS_CONTROL)              // can't enable/disable/force-stop apps in Settings
         add(UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES)   // no sideloading APKs
         add(UserManager.DISALLOW_UNINSTALL_APPS)            // can't uninstall to bypass
+        // Install lock: nothing can be installed or updated, except in an update window.
+        if (!installsAllowedNow(context)) add(UserManager.DISALLOW_INSTALL_APPS)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             add(UserManager.DISALLOW_USER_SWITCH)
@@ -300,27 +354,31 @@ fun applyStrictRestrictions(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             add(UserManager.DISALLOW_CONFIG_PRIVATE_DNS)
         }
-        if (SP.hasRebootedSinceSetup) {
+        if (SP.isSealed) {
             val cr = context.contentResolver
             val devOptionsOff = Settings.Global.getInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) == 0
             val adbOff = Settings.Global.getInt(cr, Settings.Global.ADB_ENABLED, 0) == 0
 
             if (devOptionsOff && adbOff) {
                 add(UserManager.DISALLOW_DEBUGGING_FEATURES)
-                Log.d("Lockdown", "Dev Options and ADB verified off. DEBUGGING_FEATURES locked.")
             }
         }
     }
 
+    // Only touch what actually changed. Re-sending every rule every 10 seconds makes
+    // Android rewrite its policy file each time.
     runCatching {
-        val activeRestrictions = DPM.getUserRestrictions(DAR)
-        activeRestrictions.keySet().forEach { currentRestriction ->
-            if (currentRestriction !in desiredRestrictions) {
-                DPM.clearUserRestriction(DAR, currentRestriction)
-            }
+        val bundle = DPM.getUserRestrictions(DAR)
+        val active = bundle.keySet().filter { bundle.getBoolean(it) }.toSet()
+        (active - desiredRestrictions).forEach {
+            runCatching { DPM.clearUserRestriction(DAR, it) }
+            Log.i(TAG, "Restriction cleared: $it")
         }
-        desiredRestrictions.forEach { DPM.addUserRestriction(DAR, it) }
-    }.onFailure { Log.e("Lockdown", "Failed to sync restrictions", it) }
+        (desiredRestrictions - active).forEach {
+            runCatching { DPM.addUserRestriction(DAR, it) }
+            Log.i(TAG, "Restriction set: $it")
+        }
+    }.onFailure { Log.e(TAG, "Failed to sync restrictions", it) }
 }
 
 private fun hideLauncherIcon(context: Context) = runCatching {
@@ -331,66 +389,202 @@ private fun hideLauncherIcon(context: Context) = runCatching {
     }
 }
 
+/**
+ * The blocking pass. Runs right after an install, every 2 minutes, and whenever the app list changes.
+ * It only asks Android to change what is actually wrong, so a normal pass writes nothing.
+ */
 suspend fun enforceStrictWhitelist(context: Context) = withContext(Dispatchers.IO) {
-    // Refresh the Device Owner flag first. The cached value can stay "false" until a reboot,
-    // which silently skipped all app blocking before the lock restart.
+    // Always re-read the Device Owner flag. A stale "false" once silently skipped all blocking.
     runCatching { Privilege.updateStatus() }
     if (!Privilege.status.value.device) return@withContext
-    Privilege.lockdownActive.value = true
 
-    try {
-        hideLauncherIcon(context)
-        val whitelist = AppWhitelist.getWhitelist()
-
-        // 1. User-installed apps: suspend anything not whitelisted (fixes freely-run new installs).
-        val installedApps = AppWhitelist.getInstalledUserApps(context)
-        val (toUnsuspend, toSuspend) = installedApps.map { it.packageName }.partition { it in whitelist }
-
-        if (toUnsuspend.isNotEmpty()) runCatching { DPM.setPackagesSuspended(DAR, toUnsuspend.toTypedArray(), false) }
-        if (toSuspend.isNotEmpty()) runCatching { DPM.setPackagesSuspended(DAR, toSuspend.toTypedArray(), true) }
-
-        // 2. System blocklist: force-suspend browsers/stores/etc., but never anything whitelisted.
-        val blockThese = SYSTEM_BLOCKLIST.filter { it !in whitelist }.toTypedArray()
-        if (blockThese.isNotEmpty()) runCatching { DPM.setPackagesSuspended(DAR, blockThese, true) }
-
-        // 3. Default deny: any app with a home-screen icon (system or not) that is neither
-        //    whitelisted nor essential gets suspended. Home-screen apps are never touched.
-        runCatching {
+    enforceMutex.withLock {
+        Privilege.lockdownActive.value = true
+        try {
+            hideLauncherIcon(context)
             val pm = context.packageManager
-            // Only apps with a visible home-screen icon. Hidden system parts (file picker,
-            // Android Auto, SIM menu, network unlock and similar) are never touched.
-            val flags = 0
-            fun packagesFor(category: String): Set<String> {
-                val intent = Intent(Intent.ACTION_MAIN).addCategory(category)
-                val found = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
-                } else {
-                    @Suppress("DEPRECATION") pm.queryIntentActivities(intent, flags)
-                }
-                return found.map { it.activityInfo.packageName }.toSet()
+            val self = context.packageName
+            val whitelist = AppWhitelist.getWhitelist()
+
+            val installed = installedApps(pm)
+            if (installed.isEmpty()) return@withLock // never act on a failed read
+            val launcherApps = activityPackages(pm, Intent.CATEGORY_LAUNCHER)
+            val now = SystemClock.elapsedRealtime()
+            val plan = planBlocking(
+                installed = installed.map {
+                    AppEntry(
+                        pkg = it.packageName,
+                        system = (it.flags and ApplicationInfo.FLAG_SYSTEM) != 0,
+                        paused = (it.flags and ApplicationInfo.FLAG_SUSPENDED) != 0
+                    )
+                },
+                whitelist = whitelist,
+                blocklist = SYSTEM_BLOCKLIST.asList(),
+                essential = ESSENTIAL_SYSTEM_APPS,
+                homeApps = activityPackages(pm, Intent.CATEGORY_HOME),
+                launcherApps = launcherApps,
+                self = self,
+                blockedThisRun = blockedThisRun,
+                releasedThisRun = releasedThisRun,
+                canTryBlock = { now >= (retryBlockAfter[it] ?: 0L) }
+            )
+            val toBlock = plan.toBlock
+            val toRelease = plan.toRelease
+
+            // Block only what is not blocked yet.
+            if (toBlock.isNotEmpty()) {
+                runCatching {
+                    val failed: Array<String>? = DPM.setPackagesSuspended(DAR, toBlock.toTypedArray(), true)
+                    val failedSet = failed?.toSet() ?: emptySet()
+                    failedSet.forEach { retryBlockAfter[it] = now + RETRY_BLOCK_MS }
+                    blockedThisRun.addAll(toBlock.filter { it !in failedSet })
+                    releasedThisRun.removeAll(toBlock.toSet())
+                    Log.i(TAG, "Blocked: ${toBlock.filter { it !in failedSet }} could not block: $failedSet")
+                }.onFailure { Log.e(TAG, "Block step failed", it) }
             }
-            val homeApps = packagesFor(Intent.CATEGORY_HOME)
-            val denyThese = packagesFor(Intent.CATEGORY_LAUNCHER).filter {
-                it !in whitelist && it !in ESSENTIAL_SYSTEM_APPS && it !in homeApps && it != context.packageName
-            }.toTypedArray()
-            // 4. Clean-up: release every system app that is not supposed to be blocked right now.
-            if (!releasedSystemAppsThisRun) {
-                val keepBlocked = blockThese.toSet() + denyThese.toSet()
-                val installed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
-                } else {
-                    @Suppress("DEPRECATION") pm.getInstalledApplications(0)
-                }
-                val release = installed
-                    .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) != 0 && it.packageName !in keepBlocked }
-                    .map { it.packageName }
-                    .toTypedArray()
-                if (release.isNotEmpty()) runCatching { DPM.setPackagesSuspended(DAR, release, false) }
-                releasedSystemAppsThisRun = true
+
+            // Release anything paused that should not be (an app on your list, or a phone part
+            // an older rule paused).
+            if (toRelease.isNotEmpty()) {
+                runCatching {
+                    DPM.setPackagesSuspended(DAR, toRelease.toTypedArray(), false)
+                    releasedThisRun.addAll(toRelease)
+                    blockedThisRun.removeAll(toRelease.toSet())
+                    Log.i(TAG, "Released: $toRelease")
+                }.onFailure { Log.e(TAG, "Release step failed", it) }
             }
-            if (denyThese.isNotEmpty()) DPM.setPackagesSuspended(DAR, denyThese, true)
-        }.onFailure { Log.e("Lockdown", "Default-deny sweep failed", it) }
-    } finally {
-        Privilege.lockdownActive.value = false
+        } finally {
+            Privilege.lockdownActive.value = false
+        }
     }
+}
+
+private fun installedApps(pm: PackageManager): List<ApplicationInfo> = runCatching {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+    } else {
+        @Suppress("DEPRECATION") pm.getInstalledApplications(0)
+    }
+}.getOrDefault(emptyList())
+
+private fun activityPackages(pm: PackageManager, category: String): Set<String> = runCatching {
+    val intent = Intent(Intent.ACTION_MAIN).addCategory(category)
+    // Both flags = apps that run before unlock and apps that only run after it.
+    // No hidden or disabled parts: those are system pieces such as the file picker.
+    val flags = PackageManager.MATCH_DIRECT_BOOT_AWARE or PackageManager.MATCH_DIRECT_BOOT_UNAWARE
+    val found = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
+    } else {
+        @Suppress("DEPRECATION") pm.queryIntentActivities(intent, flags)
+    }
+    found.mapNotNull { it.activityInfo?.packageName }.toSet()
+}.getOrDefault(emptySet())
+
+internal data class AppEntry(val pkg: String, val system: Boolean, val paused: Boolean)
+internal data class BlockPlan(val shouldBlock: Set<String>, val toBlock: List<String>, val toRelease: List<String>)
+
+/**
+ * Pure decision logic (no Android calls), so it can be tested on its own.
+ * - Block: apps you installed that are not on your list; built-in distractions on the block list;
+ *   any other app with a home-screen icon that is not on your list and not essential.
+ * - Never block: Monk Mind itself, anything on your list, essential phone apps, home screens.
+ * - Release: anything paused that should not be. Skipped when the icon lookup came back
+ *   empty (a failed read), so a glitch can never open the blocked apps.
+ */
+internal fun planBlocking(
+    installed: List<AppEntry>,
+    whitelist: Set<String>,
+    blocklist: List<String>,
+    essential: Set<String>,
+    homeApps: Set<String>,
+    launcherApps: Set<String>,
+    self: String,
+    blockedThisRun: Set<String>,
+    releasedThisRun: Set<String>,
+    canTryBlock: (String) -> Boolean
+): BlockPlan {
+    val installedNames = installed.map { it.pkg }.toHashSet()
+    val pausedNow = installed.filter { it.paused }.map { it.pkg }.toHashSet()
+
+    val shouldBlock = HashSet<String>()
+    installed.filter { !it.system && it.pkg !in whitelist }.mapTo(shouldBlock) { it.pkg }
+    blocklist.filterTo(shouldBlock) { it !in whitelist && it in installedNames }
+    launcherApps.filterTo(shouldBlock) {
+        it in installedNames && it !in whitelist && it !in essential && it !in homeApps
+    }
+    shouldBlock.remove(self)
+
+    val toBlock = shouldBlock
+        .filter { !(it in pausedNow && it in blockedThisRun) && canTryBlock(it) }
+        .sorted()
+    val toRelease = if (launcherApps.isEmpty()) emptyList() else pausedNow
+        .filter { it !in shouldBlock && it != self && it !in releasedThisRun }
+        .sorted()
+    return BlockPlan(shouldBlock, toBlock, toRelease)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Install lock
+// The Play Store cannot be paused (Android protects it, because it is also the phone's app
+// safety checker), so Monk Mind locks INSTALLING instead. Android itself then refuses every
+// install and update, even if Monk Mind were not running. The lock opens only in update windows.
+// ---------------------------------------------------------------------------------------------
+
+const val UPDATE_WINDOW_MS = 15 * 60 * 1000L
+
+/**
+ * Pure rule (no Android calls), so it can be tested on its own.
+ * Installing and updating apps is allowed only:
+ * - while USB debugging is on, before the seal (setup and testing);
+ * - during an "Update apps" window from the Monk Mind notification (15 minutes);
+ * - while the phone is charging with the screen off (when the Play Store auto-updates, usually overnight).
+ */
+internal fun installsAllowed(
+    usbDebuggingOn: Boolean,
+    sealed: Boolean,
+    nowMs: Long,
+    windowUntilMs: Long,
+    screenOn: Boolean,
+    pluggedIn: Boolean
+): Boolean {
+    if (usbDebuggingOn && !sealed) return true
+    if (nowMs < windowUntilMs) return true
+    if (!screenOn && pluggedIn) return true
+    return false
+}
+
+/** Reads the phone's state. Anything that cannot be read counts as "locked". */
+fun installsAllowedNow(context: Context): Boolean {
+    val cr = context.contentResolver
+    val usbDebuggingOn = runCatching {
+        Settings.Global.getInt(cr, Settings.Global.ADB_ENABLED, 0) != 0
+    }.getOrDefault(false)
+    val screenOn = runCatching {
+        context.getSystemService(PowerManager::class.java)?.isInteractive
+    }.getOrNull() ?: true
+    val pluggedIn = runCatching {
+        val battery = ContextCompat.registerReceiver(
+            context, null, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        (battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+    }.getOrDefault(false)
+    return installsAllowed(
+        usbDebuggingOn, SP.isSealed, System.currentTimeMillis(), SP.updateWindowUntil, screenOn, pluggedIn
+    )
+}
+
+/** Fast path for screen and charger changes: sets only the install lock. */
+fun enforceInstallLock(context: Context) {
+    if (!Privilege.status.value.device) return
+    runCatching {
+        val lockWanted = !installsAllowedNow(context)
+        val lockOn = DPM.getUserRestrictions(DAR).getBoolean(UserManager.DISALLOW_INSTALL_APPS)
+        if (lockWanted && !lockOn) {
+            DPM.addUserRestriction(DAR, UserManager.DISALLOW_INSTALL_APPS)
+            Log.i(TAG, "Install lock on")
+        } else if (!lockWanted && lockOn) {
+            DPM.clearUserRestriction(DAR, UserManager.DISALLOW_INSTALL_APPS)
+            Log.i(TAG, "Install lock off (update window)")
+        }
+    }.onFailure { Log.e(TAG, "Install lock failed", it) }
 }

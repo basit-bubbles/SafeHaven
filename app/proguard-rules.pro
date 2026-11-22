@@ -6,14 +6,11 @@
 -repackageclasses 'a'
 -allowaccessmodification
 
-# Strip verbose logging in production builds
+# Strip only debug chatter. Info, warning and error lines (tag "MonkMind") are kept,
+# so "adb logcat -s MonkMind" can show what Monk Mind did during the test restart.
 -assumenosideeffects class android.util.Log {
-    public static boolean isLoggable(java.lang.String, int);
     public static int v(...);
-    public static int i(...);
-    public static int w(...);
     public static int d(...);
-    public static int e(...);
 }
 
 # Hide source file name attributes in release builds

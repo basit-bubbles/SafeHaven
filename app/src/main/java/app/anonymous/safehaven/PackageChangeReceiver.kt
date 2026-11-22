@@ -7,71 +7,48 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
-import app.anonymous.safehaven.dpm.enforceStrictWhitelist
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Install listener. When an app is installed or updated:
+ * - an app you installed that is not on your list is blocked immediately, right here;
+ * - then the full blocking pass runs (which also handles built-in apps).
+ * If the app cannot be looked up, it is treated as one you installed and blocked
+ * (fail closed). The full pass releases it again if that was wrong.
+ */
 class PackageChangeReceiver : BroadcastReceiver() {
-    
-    companion object {
-        private val recentInstalls = ConcurrentHashMap<String, Long>()
-    }
-    
+
     override fun onReceive(context: Context, intent: Intent) {
-        val action = intent.action
-        if (action != Intent.ACTION_PACKAGE_ADDED && action != Intent.ACTION_PACKAGE_REPLACED) return
-        
-        val pkg = intent.data?.schemeSpecificPart ?: return
-        if (pkg == context.packageName) return
-        
-        val now = System.currentTimeMillis()
-        
-        // O(1) Fast Eviction instead of O(N) iteration
-        if (recentInstalls.size > 50) recentInstalls.clear()
+        try {
+            val action = intent.action
+            if (action != Intent.ACTION_PACKAGE_ADDED && action != Intent.ACTION_PACKAGE_REPLACED) return
+            val pkg = intent.data?.schemeSpecificPart ?: return
+            if (pkg == context.packageName) return
 
-        if (now - (recentInstalls[pkg] ?: 0L) < 2000L) return
-        recentInstalls[pkg] = now
-        
-        if (!Privilege.status.value.device || !SP.protectInstall) return
+            // Never trust a cached flag here: re-read whether Monk Mind is Device Owner.
+            runCatching { Privilege.updateStatus() }
+            if (!Privilege.status.value.device || !SP.protectInstall) return
 
-        val isWhitelisted = AppWhitelist.isWhitelistedSync(pkg)
-        
-        if (!isWhitelisted) {
-            runCatching {
-                Privilege.DPM.setPackagesSuspended(Privilege.DAR, arrayOf(pkg), true)
-                Log.d("PackageChangeReceiver", "INSTANT KILL EXECUTION for $pkg")
+            if (!AppWhitelist.isWhitelistedSync(pkg) && !isBuiltIn(context, pkg)) {
+                runCatching {
+                    Privilege.DPM.setPackagesSuspended(Privilege.DAR, arrayOf(pkg), true)
+                    Log.i(Watcher.TAG, "Blocked on install: $pkg")
+                }.onFailure { Log.e(Watcher.TAG, "Instant block failed for $pkg", it) }
             }
-        }
-
-        val pendingResult = goAsync()
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val pm = context.packageManager
-                val info = runCatching {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        pm.getPackageInfo(pkg, PackageManager.PackageInfoFlags.of(0)).applicationInfo
-                    } else {
-                        @Suppress("DEPRECATION") pm.getApplicationInfo(pkg, 0)
-                    }
-                }.getOrNull() ?: return@launch
-
-                if ((info.flags and ApplicationInfo.FLAG_SYSTEM) != 0) {
-                    if (!isWhitelisted) Privilege.DPM.setPackagesSuspended(Privilege.DAR, arrayOf(pkg), false)
-                    return@launch
-                }
-
-                if (!isWhitelisted) {
-                    enforceStrictWhitelist(context)
-                } else {
-                    Privilege.DPM.setPackagesSuspended(Privilege.DAR, arrayOf(pkg), false)
-                }
-            } catch (e: Exception) {
-                runCatching { enforceStrictWhitelist(context) }
-            } finally {
-                pendingResult.finish()
-            }
+        } catch (t: Throwable) {
+            Log.e(Watcher.TAG, "Install listener error", t)
+        } finally {
+            runCatching { Watcher.request(context, "install", full = true) }
         }
     }
+
+    /** True only when the app is confirmed to be a built-in (system) app. */
+    private fun isBuiltIn(context: Context, pkg: String): Boolean = runCatching {
+        val pm = context.packageManager
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.getApplicationInfo(pkg, PackageManager.ApplicationInfoFlags.of(0L))
+        } else {
+            @Suppress("DEPRECATION") pm.getApplicationInfo(pkg, 0)
+        }
+        (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+    }.getOrDefault(false)
 }

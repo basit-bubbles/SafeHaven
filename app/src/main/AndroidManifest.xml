@@ -6,6 +6,11 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" tools:ignore="ProtectedPermissions" />
+    <!-- Always-on guard (a Device Owner is allowed to run a "system exempted" foreground service) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".MyApplication"
@@ -71,5 +76,26 @@
                 <action android:name="android.app.action.DEVICE_ADMIN_SERVICE" />
             </intent-filter>
         </service>
+
+        <!-- Keeps Monk Mind running at all times (shows "Monk Mind is on") -->
+        <service
+            android:name=".GuardService"
+            android:exported="false"
+            android:foregroundServiceType="systemExempted|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Device owner app blocker that must keep running to block newly installed apps" />
+        </service>
+
+        <!-- "Update apps (15 min)" button on the Monk Mind notification -->
+        <receiver
+            android:name=".UpdateWindowReceiver"
+            android:exported="false" />
+
+        <!-- Backup: Android runs this every 15 minutes, even after a restart -->
+        <service
+            android:name=".GuardJobService"
+            android:exported="true"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
     </application>
 </manifest>
